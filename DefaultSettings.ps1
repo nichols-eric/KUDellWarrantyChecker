@@ -66,4 +66,10 @@ $OutputCSVHeaderLine = "$InputCSVComputerNameColumnTitle,$($ShipDateCustomFieldN
 #Log rotation interval in days
 $LogRotationIntervalInDays = 30
 
+#Path to dell warranty tool
+$DellWarrantyCLI = "C:\Program Files (x86)\Dell\CommandIntegrationSuite\DellWarranty-CLI.exe" #https://www.dell.com/support/kbdoc/en-us/000146749/dell-command-warranty
+
+#Use the dell cmd tool or api?
+$warrantySource = "API" # Options: "API" or "CMD"
+
 #TODO: Organize the settings more logically
