@@ -9,6 +9,7 @@
 .NOTES
     Release Date: 2021-05-11T13:01:00-4
     Last Updated: 2025-04-04T15:27:00-4
+    Last Updated: 2026-05-01T15:27:00-4 Eric Nichols (AI Assisted by Gemini) contributed CMD based API alternative - youll need to update your settings in DefaultSettings.ps1 to add path for dell cmd tool and warranty source
    
     Author: Luke Nichols
     Github link: https://github.com/jlukenichols/KUDellWarrantyChecker
@@ -130,18 +131,6 @@ Write-Log $LogMessage
 $LogMessage = "Checking if `$TokenExpiration $TokenExpiration is less than $(Get-Date)"
 Write-Log $LogMessage
 
-# Get auth token. Lasts for 3600 seconds.
-if ($TokenExpiration -lt (Get-Date)) {
-    #Token is expired. Get a new one.
-    $LogMessage = "Generating new auth token..."
-    Write-Log $LogMessage
-    Get-AuthToken -clientID $DellWarrantyAPIKey -clientSecret $DellWarrantyAPIKeySecret #token is written to $AuthenticationResult within the function
-} else {
-    # Token is still valid. Keep using it.
-    $LogMessage = "Found previously generated auth token that is still valid."
-    Write-Log $LogMessage
-}
-
 ##TODO: Fix this in the log. $Auth.expires_in appears to be empty.
 $LogMessage = "`$Auth.expires_in: $($Auth.expires_in)"
 Write-Log $LogMessage
@@ -160,27 +149,82 @@ $OutputCSVHeaderLine | Out-File $FullPathToOutputCSV
 # Create CSV file object for input file
 $InputCSVFile = Import-CSV -Path $FullPathToInputCSV -Delimiter $InputCSVDelimiter
 
-# Iterate through CSV file
-$LogMessage = "Looping through input file..."
-Write-Log $LogMessage
-foreach ($line in $InputCSVFile) {
-    ##TODO: Troubleshoot the issue with Dell Digital Delivery from Github issue #6: https://github.com/jlukenichols/KUDellWarrantyChecker/issues/6
-    $WarrantyData = Retrieve-WarrantyData -AuthToken $AuthenticationResult -DellSvcTag $($line.$InputCSVComputerSerialNumberColumnTitle)
-    $ShipDate = $($WarrantyData.ShipDate)
-
-    # Because one device can have various warranties, just grab the biggest (maximum) date
-    $EntitlementEndDate = ($($WarrantyData.entitlements.endDate) | measure -maximum).maximum
-
-    # Build new line for output CSV file
-    $CSVLine = "$($line.$InputCSVComputerNameColumnTitle),$($ShipDate),$($EntitlementEndDate)"
-
-    # Append new line to output CSV file
-    $CSVLine | Out-File $FullPathToOutputCSV -Append
-
-    ##TODO: Construct a pscustomobject and pass it to Export-Csv instead of manually building one line-by-line
-
-    $LogMessage = "Writing warranty data for computer $($line.$InputCSVComputerNameColumnTitle) $($line.$InputCSVComputerSerialNumberColumnTitle) to output CSV file..."
+#logic to switch between cmd and api for fetching warranty info, falls back to api
+if ($warrantySource -eq "CMD") {
+    # --- INDEPENDENT CMD BLOCK ---
+    $LogMessage = "Source set to CMD. Preparing bulk warranty export..."
     Write-Log $LogMessage
+    
+    #These are for transforming the existing input .csv
+    $CMDInputCSVFile = Join-Path $env:TEMP "DellWarrantyInput.csv"
+    $CMDWarrantyDataFile = Join-Path $env:TEMP "DellWarrantyOutput.csv"
+
+    if (Test-Path $DellWarrantyCLI) {
+        # Create the single-column input file for the CLI
+        $InputCSVFile | Select-Object -ExpandProperty $InputCSVComputerSerialNumberColumnTitle | Out-File $CMDInputCSVFile -Force
+        
+        # Execute the Dell CLI
+        & $DellWarrantyCLI /I="$CMDInputCSVFile" /E="$CMDWarrantyDataFile"
+        
+        # Read the resulting bulk data
+        $WarrantyBulkData = Import-Csv -Path $CMDWarrantyDataFile
+
+        foreach ($line in $InputCSVFile) {
+            $CurrentSvcTag = $line.$InputCSVComputerSerialNumberColumnTitle
+            
+            # Filter bulk data for this specific device
+            $DeviceEntries = $WarrantyBulkData | Where-Object { $_."Service Tag" -eq $CurrentSvcTag }
+            
+            if ($DeviceEntries) {
+                $ShipDate = $DeviceEntries[0]."Ship Date"
+                # Calculate maximum End Date across all entitlements for this tag
+                $EntitlementEndDate = ($DeviceEntries."End Date" | ForEach-Object { [DateTime]$_ } | Measure-Object -Maximum).Maximum
+                
+                $CSVLine = "$($line.$InputCSVComputerNameColumnTitle),$($ShipDate),$($EntitlementEndDate)"
+                $CSVLine | Out-File $FullPathToOutputCSV -Append
+            }
+            
+            $LogMessage = "Writing CMD warranty data for computer $($line.$InputCSVComputerNameColumnTitle) ($CurrentSvcTag)"
+            Write-Log $LogMessage
+        }
+    } else {
+        Write-Error "Dell Warranty CLI not found at $DellWarrantyCLI"
+        exit
+    }
+}
+#fall back to API method as default
+#else if ($warrantySource -eq "API") {
+else {
+
+# Get auth token. Lasts for 3600 seconds.
+if ($TokenExpiration -lt (Get-Date)) {
+    #Token is expired. Get a new one.
+    $LogMessage = "Generating new auth token..."
+    Write-Log $LogMessage
+    Get-AuthToken -clientID $DellWarrantyAPIKey -clientSecret $DellWarrantyAPIKeySecret #token is written to $AuthenticationResult within the function
+} else {
+    # Token is still valid. Keep using it.
+    $LogMessage = "Found previously generated auth token that is still valid."
+    Write-Log $LogMessage
+}
+
+    # --- INDEPENDENT API BLOCK ---
+    $LogMessage = "Source set to API. Beginning individual web requests..."
+    Write-Log $LogMessage
+
+    foreach ($line in $InputCSVFile) {
+        $CurrentSvcTag = $line.$InputCSVComputerSerialNumberColumnTitle
+        
+        $WarrantyData = Retrieve-WarrantyData -AuthToken $AuthenticationResult -DellSvcTag $CurrentSvcTag
+        $ShipDate = $WarrantyData.ShipDate
+        $EntitlementEndDate = ($WarrantyData.entitlements.endDate | Measure-Object -Maximum).Maximum
+
+        $CSVLine = "$($line.$InputCSVComputerNameColumnTitle),$($ShipDate),$($EntitlementEndDate)"
+        $CSVLine | Out-File $FullPathToOutputCSV -Append
+
+        $LogMessage = "Writing API warranty data for computer $($line.$InputCSVComputerNameColumnTitle) ($CurrentSvcTag)"
+        Write-Log $LogMessage
+    }
 }
 
 ##TODO: Write code to detect if the custom fields exist already and create them if they don't. Currently it just blindly tries to create them on every run.
